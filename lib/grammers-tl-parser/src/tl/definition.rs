@@ -54,7 +54,7 @@ impl fmt::Display for Definition {
                 ty.find_generic_refs(&mut type_defs);
             }
         }
-        type_defs.sort();
+        type_defs.sort_unstable();
         type_defs.dedup();
         for type_def in type_defs {
             write!(f, " {{{}:Type}}", type_def)?;
@@ -218,6 +218,21 @@ impl FromStr for Definition {
             ty,
             category: Category::Types,
         })
+    }
+}
+
+impl Definition {
+    /// Convenience function to format both the namespace and name back into a single string.
+    pub fn full_name(&self) -> String {
+        let mut result = String::with_capacity(
+            self.namespace.iter().map(|ns| ns.len() + 1).sum::<usize>() + self.name.len(),
+        );
+        for ns in self.namespace.iter() {
+            result.push_str(ns);
+            result.push('.');
+        }
+        result.push_str(&self.name);
+        result
     }
 }
 

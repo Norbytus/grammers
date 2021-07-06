@@ -141,6 +141,10 @@ pub struct RpcError {
 
     /// If the error contained an additional value, it will be present here.
     pub value: Option<u32>,
+
+    /// The constructor identifier of the request that triggered this error.
+    /// Won't be present if the error was artificially constructed.
+    pub caused_by: Option<u32>,
 }
 
 impl std::error::Error for RpcError {}
@@ -148,6 +152,9 @@ impl std::error::Error for RpcError {}
 impl fmt::Display for RpcError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "rpc error {}: {}", self.code, self.name)?;
+        if let Some(caused_by) = self.caused_by {
+            write!(f, " caused by {}", tl::name_for_id(caused_by))?;
+        }
         if let Some(value) = self.value {
             write!(f, " (value: {})", value)?;
         }
@@ -171,13 +178,44 @@ impl From<tl::types::RpcError> for RpcError {
                 name: error.error_message.replace(&to_remove, ""),
                 // Safe to unwrap, matched on digits
                 value: Some(value.parse().unwrap()),
+                caused_by: None,
             }
         } else {
             Self {
                 code: error.error_code,
                 name: error.error_message.clone(),
                 value: None,
+                caused_by: None,
             }
+        }
+    }
+}
+
+impl RpcError {
+    /// Matches on the name of the RPC error (case-sensitive).
+    ///
+    /// Useful in `match` arm guards. A single trailing or leading asterisk (`'*'`) is allowed,
+    /// and will instead check if the error name starts (or ends with) the input parameter.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # let request_result = Result::<(), _>::Err(grammers_mtproto::mtp::RpcError {
+    /// #     code: 400, name: "PHONE_CODE_INVALID".to_string(), value: None, caused_by: None });
+    /// #
+    /// match request_result {
+    ///     Err(rpc_err) if rpc_err.is("SESSION_PASSWORD_NEEDED") => panic!(),
+    ///     Err(rpc_err) if rpc_err.is("PHONE_CODE_*") => {},
+    ///     _ => panic!()
+    /// }
+    /// ```
+    pub fn is(&self, rpc_error: &str) -> bool {
+        if let Some(rpc_error) = rpc_error.strip_suffix('*') {
+            self.name.starts_with(rpc_error)
+        } else if let Some(rpc_error) = rpc_error.strip_prefix('*') {
+            self.name.ends_with(rpc_error)
+        } else {
+            self.name == rpc_error
         }
     }
 }
@@ -215,7 +253,20 @@ impl fmt::Display for RequestError {
         match self {
             Self::RpcError(error) => write!(f, "request error: {}", error),
             Self::Dropped => write!(f, "request error: request dropped"),
-            Self::BadMessage { code } => write!(f, "request error: bad message (code {})", code),
+            Self::BadMessage { code } => write!(f, "request error: bad message (code {}, {})", code, match code {
+                16 => "msg_id too low",
+                17 => "msg_id too high",
+                18 => "incorrect two lower order msg_id bits; this is a bug",
+                19 => "container msg_id is the same as msg_id of a previously received message; this is a bug",
+                20 => "message too old",
+                32 => "msg_seqno too low",
+                33 => "msg_seqno too high",
+                34 => "an even msg_seqno expected; this may be a bug",
+                35 => "odd msg_seqno expected; this may be a bug",
+                48 => "incorrect server salt",
+                64 => "invalid container; this is likely a bug",
+                _ => "unknown explanation; please report this issue",
+            }),
             Self::Deserialize(error) => write!(f, "request error: {}", error),
         }
     }
@@ -284,7 +335,8 @@ mod tests {
             RpcError {
                 code: 400,
                 name: "CHAT_INVALID".into(),
-                value: None
+                value: None,
+                caused_by: None,
             }
         );
 
@@ -296,7 +348,8 @@ mod tests {
             RpcError {
                 code: 420,
                 name: "FLOOD_WAIT".into(),
-                value: Some(31)
+                value: Some(31),
+                caused_by: None,
             }
         );
 
@@ -308,7 +361,8 @@ mod tests {
             RpcError {
                 code: 500,
                 name: "INTERDC_CALL_ERROR".into(),
-                value: Some(2)
+                value: Some(2),
+                caused_by: None,
             }
         );
     }

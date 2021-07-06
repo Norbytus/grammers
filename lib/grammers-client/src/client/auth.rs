@@ -6,13 +6,11 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 use super::net::connect_sender;
-use super::{Client, ClientHandle};
+use super::Client;
 use crate::types::{LoginToken, PasswordToken, TermsOfService, User};
 use crate::utils;
 use grammers_crypto::two_factor_auth::{calculate_2fa, check_p_and_g};
-use grammers_mtproto::mtp::RpcError;
 pub use grammers_mtsender::{AuthorizationError, InvocationError};
-use grammers_session::Session;
 use grammers_tl_types as tl;
 use std::fmt;
 
@@ -49,7 +47,7 @@ impl std::error::Error for SignInError {}
 ///
 /// Most requests to the API require the user to have authorized their key, stored in the session,
 /// before being able to use them.
-impl<S: Session> Client<S> {
+impl Client {
     /// Returns `true` if the current account is authorized. Otherwise,
     /// logging in will be required before being able to invoke requests.
     ///
@@ -60,7 +58,7 @@ impl<S: Session> Client<S> {
     /// # Examples
     ///
     /// ```
-    /// # async fn f(mut client: grammers_client::Client<grammers_session::MemorySession>) -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn f(mut client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
     /// if client.is_authorized().await? {
     ///     println!("Client is not authorized, you will need to sign_in!");
     /// } else {
@@ -82,13 +80,18 @@ impl<S: Session> Client<S> {
         auth: tl::types::auth::Authorization,
     ) -> Result<User, InvocationError> {
         let user = User::from_raw(auth.user);
-        self.config
-            .session
-            .set_user(user.id(), self.dc_id, user.is_bot());
+        self.0.config.session.set_user(
+            user.id(),
+            *self.0.dc_id.lock("client.complete_login"),
+            user.is_bot(),
+        );
 
         match self.invoke(&tl::functions::updates::GetState {}).await {
             Ok(state) => {
-                self.message_box.set_state(state);
+                self.0
+                    .message_box
+                    .lock("client.complete_login")
+                    .set_state(state);
                 self.sync_update_state();
             }
             Err(_) => {
@@ -111,7 +114,7 @@ impl<S: Session> Client<S> {
     /// # Examples
     ///
     /// ```
-    /// # async fn f(mut client: grammers_client::Client<grammers_session::MemorySession>) -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn f(mut client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
     /// // Note: these are example values and are not actually valid.
     /// //       Obtain your own with the developer's phone at https://my.telegram.org.
     /// const API_ID: i32 = 932939;
@@ -150,10 +153,12 @@ impl<S: Session> Client<S> {
 
         let result = match self.invoke(&request).await {
             Ok(x) => x,
-            Err(InvocationError::Rpc(RpcError { name, value, .. })) if name == "USER_MIGRATE" => {
-                let dc_id = value.unwrap() as i32;
-                self.sender = connect_sender(dc_id, &mut self.config).await?;
-                self.dc_id = dc_id;
+            Err(InvocationError::Rpc(err)) if err.is("USER_MIGRATE") => {
+                let dc_id = err.value.unwrap() as i32;
+                let (sender, request_tx) = connect_sender(dc_id, &self.0.config).await?;
+                *self.0.sender.lock("client.bot_sign_in").await = sender;
+                *self.0.request_tx.lock("client.bot_sign_in") = request_tx;
+                *self.0.dc_id.lock("client.bot_sign_in") = dc_id;
                 self.invoke(&request).await?
             }
             Err(e) => return Err(e.into()),
@@ -180,7 +185,7 @@ impl<S: Session> Client<S> {
     /// # Examples
     ///
     /// ```
-    /// # async fn f(mut client: grammers_client::Client<grammers_session::MemorySession>) -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn f(mut client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
     /// // Note: these are example values and are not actually valid.
     /// //       Obtain your own with the developer's phone at https://my.telegram.org.
     /// const API_ID: i32 = 932939;
@@ -218,16 +223,18 @@ impl<S: Session> Client<S> {
 
         let sent_code: tl::types::auth::SentCode = match self.invoke(&request).await {
             Ok(x) => x.into(),
-            Err(InvocationError::Rpc(RpcError { name, value, .. })) if name == "PHONE_MIGRATE" => {
+            Err(InvocationError::Rpc(err)) if err.is("PHONE_MIGRATE") => {
                 // Since we are not logged in (we're literally requesting for
                 // the code to login now), there's no need to export the current
                 // authorization and re-import it at a different datacenter.
                 //
                 // Just connect and generate a new authorization key with it
                 // before trying again.
-                let dc_id = value.unwrap() as i32;
-                self.sender = connect_sender(dc_id, &mut self.config).await?;
-                self.dc_id = dc_id;
+                let dc_id = err.value.unwrap() as i32;
+                let (sender, request_tx) = connect_sender(dc_id, &self.0.config).await?;
+                *self.0.sender.lock("client.request_login_code").await = sender;
+                *self.0.request_tx.lock("client.request_login_code") = request_tx;
+                *self.0.dc_id.lock("client.request_login_code") = dc_id;
                 self.invoke(&request).await?.into()
             }
             Err(e) => return Err(e.into()),
@@ -253,7 +260,7 @@ impl<S: Session> Client<S> {
     /// ```
     /// # use grammers_client::SignInError;
     ///
-    ///  async fn f(mut client: grammers_client::Client<grammers_session::MemorySession>) -> Result<(), Box<dyn std::error::Error>> {
+    ///  async fn f(mut client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
     /// # const API_ID: i32 = 0;
     /// # const API_HASH: &str = "";
     /// # const PHONE: &str = "";
@@ -295,18 +302,14 @@ impl<S: Session> Client<S> {
                     terms_of_service: x.terms_of_service.map(TermsOfService::from_raw),
                 })
             }
-            Err(InvocationError::Rpc(RpcError { name, .. }))
-                if name == "SESSION_PASSWORD_NEEDED" =>
-            {
+            Err(err) if err.is("SESSION_PASSWORD_NEEDED") => {
                 let password_token = self.get_password_information().await;
                 match password_token {
                     Ok(token) => Err(SignInError::PasswordRequired(token)),
                     Err(e) => Err(SignInError::Other(e)),
                 }
             }
-            Err(InvocationError::Rpc(RpcError { name, .. })) if name.starts_with("PHONE_CODE_") => {
-                Err(SignInError::InvalidCode)
-            }
+            Err(err) if err.is("PHONE_CODE_*") => Err(SignInError::InvalidCode),
             Err(error) => Err(SignInError::Other(error)),
         }
     }
@@ -331,7 +334,7 @@ impl<S: Session> Client<S> {
     /// ```
     /// use grammers_client::SignInError;
     ///
-    /// # async fn f(mut client: grammers_client::Client<grammers_session::MemorySession>) -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn f(mut client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
     /// # const API_ID: i32 = 0;
     /// # const API_HASH: &str = "";
     /// # const PHONE: &str = "";
@@ -375,7 +378,7 @@ impl<S: Session> Client<S> {
             password_info = self
                 .get_password_information()
                 .await
-                .map_err(|err| SignInError::Other(err.into()))?
+                .map_err(SignInError::Other)?
                 .password;
             params =
                 utils::extract_password_parameters(password_info.current_algo.as_ref().unwrap());
@@ -404,9 +407,7 @@ impl<S: Session> Client<S> {
                 self.complete_login(x).await.map_err(SignInError::Other)
             }
             Ok(tl::enums::auth::Authorization::SignUpRequired(_x)) => panic!("Unexpected result"),
-            Err(InvocationError::Rpc(RpcError { name, .. })) if name == "PASSWORD_HASH_INVALID" => {
-                Err(SignInError::InvalidPassword)
-            }
+            Err(err) if err.is("PASSWORD_HASH_INVALID") => Err(SignInError::InvalidPassword),
             Err(error) => Err(SignInError::Other(error)),
         }
     }
@@ -424,7 +425,7 @@ impl<S: Session> Client<S> {
     /// # Examples
     ///
     /// ```
-    ///  async fn f(mut client: grammers_client::Client<grammers_session::MemorySession>) -> Result<(), Box<dyn std::error::Error>> {
+    ///  async fn f(mut client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
     /// # let token = client.request_login_code("", 0, "").await?;
     /// # let code = "".to_string();
     ///
@@ -486,13 +487,12 @@ impl<S: Session> Client<S> {
     /// The client is not disconnected after signing out.
     ///
     /// Note that after using this method you will have to sign in again. If all you want to do
-    /// is disconnect, simply [`drop`] the [`Client`] instance or use the
-    /// [`ClientHandle::disconnect`] method.
+    /// is disconnect, simply [`drop`] the [`Client`] instance.
     ///
     /// # Examples
     ///
     /// ```
-    /// # async fn f(mut client: grammers_client::Client<grammers_session::MemorySession>) -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn f(mut client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
     /// if client.sign_out().await? {
     ///     println!("Signed out successfully!");
     /// } else {
@@ -501,8 +501,6 @@ impl<S: Session> Client<S> {
     /// # Ok(())
     /// # }
     /// ```
-    ///
-    /// [`ClientHandle::disconnect`]: crate::ClientHandle::disconnect
     pub async fn sign_out(&mut self) -> Result<bool, InvocationError> {
         self.invoke(&tl::functions::auth::LogOut {}).await
     }
@@ -512,20 +510,16 @@ impl<S: Session> Client<S> {
     /// You can use this to temporarily access the session and save it wherever you want to.
     ///
     /// Panics if the type parameter does not match the actual session type.
-    pub fn session(&mut self) -> &mut S {
+    pub fn session(&self) -> &grammers_session::Session {
         self.sync_update_state();
-        &mut self.config.session
+        &self.0.config.session
     }
-}
 
-/// Method implementations related with the authentication of the user into the API.
-impl ClientHandle {
     /// Calls [`Client::sign_out`] and disconnects.
     ///
     /// The client will be disconnected even if signing out fails.
     pub async fn sign_out_disconnect(&mut self) -> Result<(), InvocationError> {
-        let res = self.invoke(&tl::functions::auth::LogOut {}).await;
-        self.disconnect().await;
-        res.map(drop)
+        let _res = self.invoke(&tl::functions::auth::LogOut {}).await;
+        panic!("disconnect now only works via dropping");
     }
 }

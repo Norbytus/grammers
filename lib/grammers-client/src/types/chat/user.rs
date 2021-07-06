@@ -13,7 +13,7 @@ use std::fmt;
 pub enum Platform {
     All,
     Android,
-    IOS,
+    Ios,
     WindowsPhone,
     Other(String),
 }
@@ -31,12 +31,12 @@ impl RestrictionReason {
         Self {
             platforms: reason
                 .platform
-                .split("-")
+                .split('-')
                 .map(|p| match p {
                     // Taken from https://core.telegram.org/constructor/restrictionReason
                     "all" => Platform::All,
                     "android" => Platform::Android,
-                    "ios" => Platform::IOS,
+                    "ios" => Platform::Ios,
                     "wp" => Platform::WindowsPhone,
                     o => Platform::Other(o.to_string()),
                 })
@@ -60,7 +60,7 @@ impl RestrictionReason {
 ///
 /// [@BotFather]: https://t.me/BotFather
 #[derive(Clone)]
-pub struct User(tl::types::User);
+pub struct User(pub(crate) tl::types::User);
 
 impl fmt::Debug for User {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -87,6 +87,7 @@ impl User {
                 support: false,
                 scam: false,
                 apply_min_photo: false,
+                fake: false,
                 id: empty.id,
                 access_hash: None,
                 first_name: None,
@@ -127,6 +128,10 @@ impl User {
     /// Return the unique identifier for this user.
     pub fn id(&self) -> i32 {
         self.0.id
+    }
+
+    pub(crate) fn access_hash(&self) -> Option<i64> {
+        self.0.access_hash
     }
 
     /// Return the first name of this user.

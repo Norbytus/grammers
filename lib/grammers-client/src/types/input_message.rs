@@ -5,7 +5,8 @@
 // <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
-use crate::types::Uploaded;
+use super::attributes::Attribute;
+use crate::types::{Media, ReplyMarkup, Uploaded};
 use grammers_tl_types as tl;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -58,11 +59,18 @@ impl InputMessage {
         self
     }
 
-    /// The reply markup to show under the message.
+    /// Defines the suggested reply markup for the message (such as adding inline buttons).
+    /// This will be displayed below the message.
     ///
-    /// User accounts cannot use markup, and it will be ignored if set.
-    pub fn reply_markup(mut self, reply_markup: Option<tl::enums::ReplyMarkup>) -> Self {
-        self.reply_markup = reply_markup;
+    /// Only bot accounts can make use of the reply markup feature (a user attempting to send a
+    /// message with a reply markup will result in the markup being ignored by Telegram).
+    ///
+    /// The user is free to ignore the markup and continue sending usual text messages.
+    ///
+    /// See [`crate::reply_markup`] for the different available markups along with how
+    /// they behave.
+    pub fn reply_markup<RM: ReplyMarkup>(mut self, markup: &RM) -> Self {
+        self.reply_markup = Some(markup.to_reply_markup().0);
         self
     }
 
@@ -111,7 +119,7 @@ impl InputMessage {
 
     /// Include the uploaded file as a photo in the message.
     ///
-    /// The server will compress the image and convert it to JPEG format if necessary.
+    /// The Telegram server will compress the image and convert it to JPEG format if necessary.
     ///
     /// The text will be the caption of the photo, which may be empty for no caption.
     pub fn photo(mut self, file: Uploaded) -> Self {
@@ -126,6 +134,23 @@ impl InputMessage {
         self
     }
 
+    /// Include an external photo in the message.
+    ///
+    /// The Telegram server will download and compress the image and convert it to JPEG format if
+    /// necessary.
+    ///
+    /// The text will be the caption of the photo, which may be empty for no caption.
+    pub fn photo_url(mut self, url: impl Into<String>) -> Self {
+        self.media = Some(
+            tl::types::InputMediaPhotoExternal {
+                url: url.into(),
+                ttl_seconds: self.media_ttl,
+            }
+            .into(),
+        );
+        self
+    }
+
     /// Include the uploaded file as a document in the message.
     ///
     /// You can use this to send videos, stickers, audios, or uncompressed photos.
@@ -133,6 +158,7 @@ impl InputMessage {
     /// The text will be the caption of the document, which may be empty for no caption.
     pub fn document(mut self, file: Uploaded) -> Self {
         let mime_type = self.get_file_mime(&file);
+        let file_name = file.name().to_string();
         self.media = Some(
             tl::types::InputMediaUploadedDocument {
                 nosound_video: false,
@@ -140,12 +166,71 @@ impl InputMessage {
                 file: file.input_file,
                 thumb: None,
                 mime_type,
-                attributes: Vec::new(),
+                attributes: vec![tl::types::DocumentAttributeFilename { file_name }.into()],
                 stickers: None,
                 ttl_seconds: self.media_ttl,
             }
             .into(),
         );
+        self
+    }
+
+    /// Include an external file as a document in the message.
+    ///
+    /// You can use this to send videos, stickers, audios, or uncompressed photos.
+    ///
+    /// The Telegram server will be the one that downloads and includes the document as media.
+    ///
+    /// The text will be the caption of the document, which may be empty for no caption.
+    pub fn document_url(mut self, url: impl Into<String>) -> Self {
+        self.media = Some(
+            tl::types::InputMediaDocumentExternal {
+                url: url.into(),
+                ttl_seconds: self.media_ttl,
+            }
+            .into(),
+        );
+        self
+    }
+
+    /// Add additional attributes to the message.
+    ///
+    /// This must be called *after* setting a file.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # async fn f(client: &mut grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// # let audio = client.upload_file("audio.flac").await?;
+    /// #
+    /// use std::time::Duration;
+    /// use grammers_client::{types::Attribute, InputMessage};
+    ///
+    /// let message = InputMessage::text("").document(audio).attribute(
+    ///    Attribute::Audio {
+    ///        duration: Duration::new(123, 0),
+    ///        title: Some("Hello".to_string()),
+    ///        performer: Some("World".to_string()),
+    ///    }
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn attribute(mut self, attr: Attribute) -> Self {
+        match &mut self.media {
+            Some(tl::enums::InputMedia::UploadedDocument(document)) => {
+                document.attributes.push(attr.into());
+            }
+            _ => {}
+        }
+        self
+    }
+
+    /// Copy media from an existing message.
+    ///
+    /// You can use this to send media from another message without re-uploading it.
+    pub fn copy_media(mut self, media: &Media) -> Self {
+        self.media = Some(media.to_input_media());
         self
     }
 
@@ -156,6 +241,7 @@ impl InputMessage {
     /// The text will be the caption of the file, which may be empty for no caption.
     pub fn file(mut self, file: Uploaded) -> Self {
         let mime_type = self.get_file_mime(&file);
+        let file_name = file.name().to_string();
         self.media = Some(
             tl::types::InputMediaUploadedDocument {
                 nosound_video: false,
@@ -163,7 +249,7 @@ impl InputMessage {
                 file: file.input_file,
                 thumb: None,
                 mime_type,
-                attributes: Vec::new(),
+                attributes: vec![tl::types::DocumentAttributeFilename { file_name }.into()],
                 stickers: None,
                 ttl_seconds: self.media_ttl,
             }

@@ -8,9 +8,10 @@
 use crate::types::{InputMessage, Media, Photo};
 use crate::utils;
 use crate::ChatMap;
-use crate::{types, ClientHandle};
+use crate::{types, Client};
 use grammers_mtsender::InvocationError;
 use grammers_tl_types as tl;
+use std::fmt;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
@@ -29,7 +30,7 @@ pub struct Message {
     // messages are interpreted as messages and their action stored separatedly.
     pub(crate) msg: tl::types::Message,
     pub(crate) action: Option<tl::enums::MessageAction>,
-    pub(crate) client: ClientHandle,
+    pub(crate) client: Client,
     // When fetching messages or receiving updates, a set of chats will be present. A single
     // server response contains a lot of chats, and some might be related to deep layers of
     // a message action for instance. Keeping the entire set like this allows for cheaper clones
@@ -39,7 +40,7 @@ pub struct Message {
 
 impl Message {
     pub(crate) fn new(
-        client: &ClientHandle,
+        client: &Client,
         message: tl::enums::Message,
         chats: &Arc<types::ChatMap>,
     ) -> Option<Self> {
@@ -81,6 +82,7 @@ impl Message {
                     post_author: None,
                     grouped_id: None,
                     restriction_reason: None,
+                    ttl_period: msg.ttl_period,
                 },
                 action: Some(msg.action),
                 client: client.clone(),
@@ -90,7 +92,7 @@ impl Message {
     }
 
     pub(crate) fn from_short_updates(
-        client: &ClientHandle,
+        client: &Client,
         updates: tl::types::UpdateShortSentMessage,
         input: InputMessage,
         chat: &Chat,
@@ -131,6 +133,7 @@ impl Message {
                 post_author: None,
                 grouped_id: None,
                 restriction_reason: None,
+                ttl_period: updates.ttl_period,
             },
             action: None,
             client: client.clone(),
@@ -202,7 +205,7 @@ impl Message {
     ///
     /// **You cannot use the message ID of User A when running as User B**, unless this message
     /// belongs to a megagroup or broadcast channel. Beware of this when using methods like
-    /// [`ClientHandle::delete_messages`], which **cannot** validate the chat where the message
+    /// [`Client::delete_messages`], which **cannot** validate the chat where the message
     /// should be deleted for those cases.
     pub fn id(&self) -> i32 {
         self.msg.id
@@ -223,7 +226,7 @@ impl Message {
                 }
             })
             .and_then(|from| self.chats.get(from))
-            .map(|e| e.clone())
+            .cloned()
     }
 
     /// The chat where this message was sent to.
@@ -231,10 +234,7 @@ impl Message {
     /// This might be the user you're talking to for private conversations, or the group or
     /// channel where the message was sent.
     pub fn chat(&self) -> types::Chat {
-        self.chats
-            .get(&self.msg.peer_id)
-            .map(|e| e.clone())
-            .unwrap()
+        self.chats.get(&self.msg.peer_id).cloned().unwrap()
     }
 
     /// If this message was forwarded from a previous message, return the header with information
@@ -357,7 +357,7 @@ impl Message {
     /// Fetch the message that this message is replying to, or `None` if this message is not a
     /// reply to a previous message.
     ///
-    /// Shorthand for `ClientHandle::get_reply_to_message`.
+    /// Shorthand for `Client::get_reply_to_message`.
     pub async fn get_reply(&mut self) -> Result<Option<Self>, InvocationError> {
         self.client
             .clone() // TODO don't clone
@@ -368,16 +368,16 @@ impl Message {
     /// Respond to this message by sending a new message in the same chat, but without directly
     /// replying to it.
     ///
-    /// Shorthand for `ClientHandle::send_message`.
-    pub async fn respond(&mut self, message: types::InputMessage) -> Result<Self, InvocationError> {
+    /// Shorthand for `Client::send_message`.
+    pub async fn respond(&self, message: types::InputMessage) -> Result<Self, InvocationError> {
         self.client.send_message(&self.chat(), message).await
     }
 
     /// Directly reply to this message by sending a new message in the same chat that replies to
     /// it. This methods overrides the `reply_to` on the `InputMessage` to point to `self`.
     ///
-    /// Shorthand for `ClientHandle::send_message`.
-    pub async fn reply(&mut self, message: types::InputMessage) -> Result<Self, InvocationError> {
+    /// Shorthand for `Client::send_message`.
+    pub async fn reply(&self, message: types::InputMessage) -> Result<Self, InvocationError> {
         self.client
             .send_message(&self.chat(), message.reply_to(Some(self.msg.id)))
             .await
@@ -385,9 +385,9 @@ impl Message {
 
     /// Forward this message to another (or the same) chat.
     ///
-    /// Shorthand for `ClientHandle::forward_messages`. If you need to forward multiple messages
+    /// Shorthand for `Client::forward_messages`. If you need to forward multiple messages
     /// at once, consider using that method instead.
-    pub async fn forward_to(&mut self, chat: &Chat) -> Result<Self, InvocationError> {
+    pub async fn forward_to(&self, chat: &Chat) -> Result<Self, InvocationError> {
         // TODO return `Message`
         // When forwarding a single message, if it fails, Telegram should respond with RPC error.
         // If it succeeds we will have the single forwarded message present which we can unwrap.
@@ -399,7 +399,7 @@ impl Message {
 
     /// Edit this message to change its text or media.
     ///
-    /// Shorthand for `ClientHandle::edit_message`.
+    /// Shorthand for `Client::edit_message`.
     pub async fn edit(&mut self, new_message: types::InputMessage) -> Result<(), InvocationError> {
         self.client
             .edit_message(&self.chat(), self.msg.id, new_message)
@@ -408,7 +408,7 @@ impl Message {
 
     /// Delete this message for everyone.
     ///
-    /// Shorthand for `ClientHandle::delete_messages`. If you need to delete multiple messages
+    /// Shorthand for `Client::delete_messages`. If you need to delete multiple messages
     /// at once, consider using that method instead.
     pub async fn delete(&mut self) -> Result<(), InvocationError> {
         self.client
@@ -419,7 +419,7 @@ impl Message {
 
     /// Mark this message and all messages above it as read.
     ///
-    /// Unlike `ClientHandle::mark_as_read`, this method only will mark the chat as read up to
+    /// Unlike `Client::mark_as_read`, this method only will mark the chat as read up to
     /// this message, not the entire chat.
     pub async fn mark_as_read(&mut self) -> Result<(), InvocationError> {
         if let Some(channel) = self.chat().to_input_channel() {
@@ -443,14 +443,14 @@ impl Message {
 
     /// Pin this message in the chat.
     ///
-    /// Shorthand for `ClientHandle::pin_message`.
+    /// Shorthand for `Client::pin_message`.
     pub async fn pin(&mut self) -> Result<(), InvocationError> {
         self.client.pin_message(&self.chat(), self.msg.id).await
     }
 
     /// Unpin this message from the chat.
     ///
-    /// Shorthand for `ClientHandle::unpin_message`.
+    /// Shorthand for `Client::unpin_message`.
     pub async fn unpin(&mut self) -> Result<(), InvocationError> {
         self.client.unpin_message(&self.chat(), self.msg.id).await
     }
@@ -459,8 +459,8 @@ impl Message {
     ///
     /// No changes will be made to the message if it fails to be fetched.
     ///
-    /// Shorthand for `ClientHandle::get_messages_by_id`.
-    pub async fn refetch(&mut self) -> Result<(), InvocationError> {
+    /// Shorthand for `Client::get_messages_by_id`.
+    pub async fn refetch(&self) -> Result<(), InvocationError> {
         // When fetching a single message, if it fails, Telegram should respond with RPC error.
         // If it succeeds we will have the single message present which we can unwrap.
         self.client
@@ -476,7 +476,7 @@ impl Message {
     ///
     /// Returns `true` if there was media to download, or `false` otherwise.
     ///
-    /// Shorthand for `ClientHandle::download_media`.
+    /// Shorthand for `Client::download_media`.
     pub async fn download_media<P: AsRef<Path>>(&mut self, path: P) -> Result<bool, io::Error> {
         // TODO probably encode failed download in error
         if let Some(media) = self.media() {
@@ -493,5 +493,40 @@ impl Message {
         }
 
         None
+    }
+}
+
+impl fmt::Debug for Message {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Message")
+            .field("id", &self.id())
+            .field("outgoing", &self.outgoing())
+            .field("date", &self.date())
+            .field("text", &self.text())
+            .field("chat", &self.chat())
+            .field("sender", &self.sender())
+            .field("reply_to_message_id", &self.reply_to_message_id())
+            .field("via_bot_id", &self.via_bot_id())
+            .field("media", &self.media())
+            .field("mentioned", &self.mentioned())
+            .field("media_unread", &self.media_unread())
+            .field("silent", &self.silent())
+            .field("post", &self.post())
+            .field("from_scheduled", &self.from_scheduled())
+            .field("edit_hide", &self.edit_hide())
+            .field("pinned", &self.pinned())
+            .field("forward_header", &self.forward_header())
+            .field("reply_header", &self.reply_header())
+            .field("reply_markup", &self.reply_markup())
+            .field("fmt_entities", &self.fmt_entities())
+            .field("view_count", &self.view_count())
+            .field("forward_count", &self.forward_count())
+            .field("reply_count", &self.reply_count())
+            .field("edit_date", &self.edit_date())
+            .field("post_author", &self.post_author())
+            .field("grouped_id", &self.grouped_id())
+            .field("restriction_reason", &self.restriction_reason())
+            .field("action", &self.action())
+            .finish()
     }
 }

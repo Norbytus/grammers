@@ -8,6 +8,7 @@
 #![cfg(any(feature = "markdown", feature = "html"))]
 use grammers_tl_types as tl;
 
+#[cfg(feature = "html")]
 const CODE_LANG_PREFIX: &str = "language-";
 
 /// The length of a string, according to Telegram.
@@ -137,10 +138,20 @@ pub fn parse_markdown_message(message: &str) -> (String, Vec<tl::enums::MessageE
         Event::End(Tag::CodeBlock(_kind)) => {
             update_entity_len!(Pre(offset) => entities);
         }
-
+        // "\\\n"
+        Event::HardBreak => {
+            text.push('\n');
+            offset += 1;
+        }
+        // "\n\n"
+        Event::End(Tag::Paragraph) => {
+            text.push_str("\n\n");
+            offset += 2;
+        }
         _ => {}
     });
 
+    text.truncate(text.trim_end().len());
     (text, entities)
 }
 

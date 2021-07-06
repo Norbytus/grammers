@@ -12,7 +12,7 @@ use tokio::io::AsyncWriteExt;
 
 use grammers_tl_types as tl;
 
-use crate::ClientHandle;
+use crate::Client;
 
 pub enum PhotoSize {
     Empty(SizeEmpty),
@@ -27,7 +27,7 @@ impl PhotoSize {
     pub(crate) fn make_from(
         size: &tl::enums::PhotoSize,
         photo: &tl::types::Photo,
-        client: ClientHandle,
+        client: Client,
     ) -> Self {
         match size {
             tl::enums::PhotoSize::Empty(size) => PhotoSize::Empty(SizeEmpty {
@@ -102,8 +102,8 @@ impl PhotoSize {
             }
             PhotoSize::Size(size) => {
                 let input_location = tl::types::InputPhotoFileLocation {
-                    id: size.id.clone(),
-                    access_hash: size.access_hash.clone(),
+                    id: size.id,
+                    access_hash: size.access_hash,
                     file_reference: size.file_reference.clone(),
                     thumb_size: size.photo_type.clone(),
                 };
@@ -191,11 +191,10 @@ impl PhotoSize {
             }
             PhotoSize::Path(size) => {
                 // Based on https://core.tlgr.org/api/files#vector-thumbnails
-                let encoded = &size.bytes;
                 let lookup = "AACAAAAHAAALMAAAQASTAVAAAZaacaaaahaaalmaaaqastava.az0123456789-,";
                 let mut path = String::from("M");
-                for i in 0..encoded.len() {
-                    let num = encoded[i];
+                for num in &size.bytes {
+                    let num = *num;
                     if num >= 128 + 64 {
                         path.push(lookup.chars().nth((num - 128 - 64) as usize).unwrap());
                     } else {
@@ -250,7 +249,7 @@ pub struct Size {
     access_hash: i64,
     file_reference: Vec<u8>,
 
-    client: ClientHandle,
+    client: Client,
 }
 
 /// Description of an image and its content.

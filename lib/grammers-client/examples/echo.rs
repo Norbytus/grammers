@@ -10,8 +10,8 @@
 //! cargo run --example echo -- BOT_TOKEN
 //! ```
 
-use grammers_client::{Client, ClientHandle, Config, InitParams, Update, UpdateIter};
-use grammers_session::FileSession;
+use grammers_client::{Client, Config, InitParams, Update};
+use grammers_session::Session;
 use log;
 use simple_logger::SimpleLogger;
 use std::env;
@@ -19,16 +19,16 @@ use tokio::{runtime, task};
 
 type Result = std::result::Result<(), Box<dyn std::error::Error>>;
 
-async fn handle_update(mut client: ClientHandle, updates: UpdateIter) -> Result {
-    for update in updates {
-        match update {
-            Update::NewMessage(message) if !message.outgoing() => {
-                let chat = message.chat();
-                println!("Responding to {}", chat.name());
-                client.send_message(&chat, message.text().into()).await?;
-            }
-            _ => {}
+const SESSION_FILE: &str = "echo.session";
+
+async fn handle_update(client: Client, update: Update) -> Result {
+    match update {
+        Update::NewMessage(message) if !message.outgoing() => {
+            let chat = message.chat();
+            println!("Responding to {}", chat.name());
+            client.send_message(&chat, message.text().into()).await?;
         }
+        _ => {}
     }
 
     Ok(())
@@ -46,7 +46,7 @@ async fn async_main() -> Result {
 
     println!("Connecting to Telegram...");
     let mut client = Client::connect(Config {
-        session: FileSession::load_or_create("echo.session")?,
+        session: Session::load_file_or_create(SESSION_FILE)?,
         api_id,
         api_hash: api_hash.clone(),
         params: InitParams {
@@ -61,27 +61,31 @@ async fn async_main() -> Result {
     if !client.is_authorized().await? {
         println!("Signing in...");
         client.bot_sign_in(&token, api_id, &api_hash).await?;
-        client.session().save()?;
+        client.session().save_to_file(SESSION_FILE)?;
         println!("Signed in!");
     }
 
     println!("Waiting for messages...");
-    while let Some(updates) = client.next_updates().await? {
-        let handle = client.handle();
+
+    // This code uses `select!` on Ctrl+C to gracefully stop the client and have a chance to
+    // save the session. You could have fancier logic to save the session if you wanted to
+    // (or even save it on every update). Or you could also ignore Ctrl+C and just use
+    // `while let Some(updates) =  client.next_updates().await?`.
+    while let Some(update) = tokio::select! {
+        _ = tokio::signal::ctrl_c() => Ok(None),
+        result = client.next_update() => result,
+    }? {
+        let handle = client.clone();
         task::spawn(async move {
-            match handle_update(handle, updates).await {
+            match handle_update(handle, update).await {
                 Ok(_) => {}
                 Err(e) => eprintln!("Error handling updates!: {}", e),
             }
         });
-
-        // Save the session file on every update so that we can correctly resume next time we
-        // connect after a period of being offline (catching up on updates).
-        //
-        // The alternative is to detect `Ctrl+C` and break from the loop.
-        client.session().save()?;
     }
 
+    println!("Saving session file and exiting...");
+    client.session().save_to_file(SESSION_FILE)?;
     Ok(())
 }
 

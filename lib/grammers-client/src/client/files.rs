@@ -7,38 +7,38 @@
 // except according to those terms.
 
 use crate::types::{Media, Uploaded};
-use crate::utils::generate_random_id;
-use crate::ClientHandle;
+use crate::utils::{generate_random_id, AsyncMutex};
+use crate::Client;
+use futures_util::future::try_join_all;
 use grammers_mtsender::InvocationError;
 use grammers_tl_types as tl;
-use std::io::SeekFrom;
-use std::path::Path;
-use tokio::fs;
-use tokio::io::{self, AsyncRead, AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
+use std::{io::SeekFrom, path::Path, sync::Arc};
+use tokio::{
+    fs,
+    io::{self, AsyncRead, AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _},
+};
 
 pub const MIN_CHUNK_SIZE: i32 = 4 * 1024;
 pub const MAX_CHUNK_SIZE: i32 = 512 * 1024;
 const BIG_FILE_SIZE: usize = 10 * 1024 * 1024;
+const WORKER_COUNT: usize = 4;
 
 pub struct DownloadIter {
-    client: ClientHandle,
+    client: Client,
     done: bool,
     request: tl::functions::upload::GetFile,
 }
 
 impl DownloadIter {
-    fn new(client: &ClientHandle, media: &Media) -> Self {
+    fn new(client: &Client, media: &Media) -> Self {
         DownloadIter::new_from_file_location(client, media.to_input_location().unwrap())
     }
 
-    fn new_from_location(client: &ClientHandle, location: tl::enums::InputFileLocation) -> Self {
+    fn new_from_location(client: &Client, location: tl::enums::InputFileLocation) -> Self {
         DownloadIter::new_from_file_location(client, location)
     }
 
-    fn new_from_file_location(
-        client: &ClientHandle,
-        location: tl::enums::InputFileLocation,
-    ) -> Self {
+    fn new_from_file_location(client: &Client, location: tl::enums::InputFileLocation) -> Self {
         // TODO let users tweak all the options from the request
         // TODO cdn support
         Self {
@@ -104,13 +104,13 @@ impl DownloadIter {
 }
 
 /// Method implementations related to uploading or downloading files.
-impl ClientHandle {
+impl Client {
     /// Returns a new iterator over the contents of a media document that will be downloaded.
     ///
     /// # Examples
     ///
     /// ```
-    /// # async fn f(media: grammers_client::types::Media, mut client: grammers_client::ClientHandle) -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn f(media: grammers_client::types::Media, mut client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
     /// let mut file_bytes = Vec::new();
     /// let mut download = client.iter_download(&media);
     ///
@@ -130,35 +130,35 @@ impl ClientHandle {
     ///
     /// If the file already exists, it will be overwritten.
     ///
-    /// This is a small wrapper around [`ClientHandle::iter_download`] for the common case of
+    /// This is a small wrapper around [`Client::iter_download`] for the common case of
     /// wanting to save the file locally.
     ///
     /// # Examples
     ///
     /// ```
-    /// # async fn f(media: grammers_client::types::Media, mut client: grammers_client::ClientHandle) -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn f(media: grammers_client::types::Media, mut client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
     /// client.download_media(&media, "/home/username/photos/holidays.jpg").await?;
     /// # Ok(())
     /// # }
     /// ```
     pub async fn download_media<P: AsRef<Path>>(
-        &mut self,
+        &self,
         media: &Media,
         path: P,
     ) -> Result<(), io::Error> {
         let mut download = self.iter_download(media);
 
-        ClientHandle::load(path, &mut download).await
+        Client::load(path, &mut download).await
     }
 
     pub(crate) async fn download_media_at_location<P: AsRef<Path>>(
-        &mut self,
+        &self,
         location: tl::enums::InputFileLocation,
         path: P,
     ) -> Result<(), io::Error> {
         let mut download = DownloadIter::new_from_location(self, location);
 
-        ClientHandle::load(path, &mut download).await
+        Client::load(path, &mut download).await
     }
 
     async fn load<P: AsRef<Path>>(path: P, download: &mut DownloadIter) -> Result<(), io::Error> {
@@ -198,7 +198,7 @@ impl ClientHandle {
     /// # Examples
     ///
     /// ```
-    /// # async fn f(chat: grammers_client::types::Chat, mut client: grammers_client::ClientHandle, some_vec: &mut Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn f(chat: grammers_client::types::Chat, client: grammers_client::Client, some_vec: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
     /// use grammers_client::InputMessage;
     ///
     /// // In-memory `Vec<u8>` buffers can be used as async streams
@@ -213,7 +213,7 @@ impl ClientHandle {
     ///
     /// [`InputMessage`]: crate::types::InputMessage
     pub async fn upload_stream<S: AsyncRead + Unpin>(
-        &mut self,
+        &self,
         stream: &mut S,
         size: usize,
         name: String,
@@ -226,71 +226,79 @@ impl ClientHandle {
         };
 
         let big_file = size > BIG_FILE_SIZE;
-        let mut buffer = vec![0; MAX_CHUNK_SIZE as usize];
-        let total_parts = ((size + buffer.len() - 1) / buffer.len()) as i32;
-        let mut md5 = md5::Context::new();
+        let parts = PartStream::new(stream, size);
+        let total_parts = parts.total_parts();
 
-        for part in 0..total_parts {
-            let mut read = 0;
-            while read != buffer.len() {
-                let n = stream.read(&mut buffer[read..]).await?;
-                if n == 0 {
-                    if part == total_parts - 1 {
-                        break;
-                    } else {
-                        return Err(io::Error::new(
-                            io::ErrorKind::UnexpectedEof,
-                            "reached EOF before reaching the last file part",
-                        ));
+        if big_file {
+            let parts = Arc::new(parts);
+            let mut tasks = Vec::with_capacity(WORKER_COUNT);
+            for _ in 0..WORKER_COUNT {
+                let handle = self.clone();
+                let parts = Arc::clone(&parts);
+                let task = async move {
+                    while let Some((part, bytes)) = parts.next_part().await? {
+                        let ok = handle
+                            .invoke(&tl::functions::upload::SaveBigFilePart {
+                                file_id,
+                                file_part: part,
+                                file_total_parts: total_parts,
+                                bytes,
+                            })
+                            .await
+                            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+                        if !ok {
+                            return Err(io::Error::new(
+                                io::ErrorKind::Other,
+                                "server failed to store uploaded data",
+                            ));
+                        }
                     }
+                    Ok(())
+                };
+                tasks.push(task);
+            }
+
+            try_join_all(tasks).await?;
+
+            Ok(Uploaded::from_raw(
+                tl::types::InputFileBig {
+                    id: file_id,
+                    parts: total_parts,
+                    name,
                 }
-                read += n;
-            }
-            let bytes = buffer[..read].to_vec();
-
-            let ok = if big_file {
-                self.invoke(&tl::functions::upload::SaveBigFilePart {
-                    file_id,
-                    file_part: part,
-                    file_total_parts: total_parts,
-                    bytes,
-                })
-                .await
-            } else {
-                md5.consume(&bytes);
-                self.invoke(&tl::functions::upload::SaveFilePart {
-                    file_id,
-                    file_part: part,
-                    bytes,
-                })
-                .await
-            }
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-
-            if !ok {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "server failed to store uploaded data",
-                ));
-            }
-        }
-
-        Ok(Uploaded::from_raw(if big_file {
-            tl::types::InputFileBig {
-                id: file_id,
-                parts: total_parts,
-                name,
-            }
-            .into()
+                .into(),
+            ))
         } else {
-            tl::types::InputFile {
-                id: file_id,
-                parts: total_parts,
-                name,
-                md5_checksum: format!("{:x}", md5.compute()),
+            let mut md5 = md5::Context::new();
+            while let Some((part, bytes)) = parts.next_part().await? {
+                md5.consume(&bytes);
+                let ok = self
+                    .invoke(&tl::functions::upload::SaveFilePart {
+                        file_id,
+                        file_part: part,
+                        bytes,
+                    })
+                    .await
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+                if !ok {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        "server failed to store uploaded data",
+                    ));
+                }
             }
-            .into()
-        }))
+            Ok(Uploaded::from_raw(
+                tl::types::InputFile {
+                    id: file_id,
+                    parts: total_parts,
+                    name,
+                    md5_checksum: format!("{:x}", md5.compute()),
+                }
+                .into(),
+            ))
+        }
     }
 
     /// Uploads a local file to Telegram servers.
@@ -301,12 +309,12 @@ impl ClientHandle {
     /// Refer to [`InputMessage`] to learn more uses for `uploaded_file`.
     ///
     /// If you need more control over the uploaded data, such as performing only a partial upload
-    /// or with a different name, use [`ClientHandle::upload_stream`] instead.
+    /// or with a different name, use [`Client::upload_stream`] instead.
     ///
     /// # Examples
     ///
     /// ```
-    /// # async fn f(chat: grammers_client::types::Chat, mut client: grammers_client::ClientHandle) -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn f(chat: grammers_client::types::Chat, mut client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
     /// use grammers_client::InputMessage;
     ///
     /// let uploaded_file = client.upload_file("/home/username/photos/holidays.jpg").await?;
@@ -317,7 +325,7 @@ impl ClientHandle {
     /// ```
     ///
     /// [`InputMessage`]: crate::InputMessage
-    pub async fn upload_file<P: AsRef<Path>>(&mut self, path: P) -> Result<Uploaded, io::Error> {
+    pub async fn upload_file<P: AsRef<Path>>(&self, path: P) -> Result<Uploaded, io::Error> {
         let path = path.as_ref();
 
         let mut file = fs::File::open(path).await?;
@@ -329,5 +337,69 @@ impl ClientHandle {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
 
         self.upload_stream(&mut file, size, name).await
+    }
+}
+
+struct PartStreamInner<'a, S: AsyncRead + Unpin> {
+    stream: &'a mut S,
+    current_part: i32,
+}
+
+struct PartStream<'a, S: AsyncRead + Unpin> {
+    inner: AsyncMutex<PartStreamInner<'a, S>>,
+    total_parts: i32,
+}
+
+impl<'a, S: AsyncRead + Unpin> PartStream<'a, S> {
+    fn new(stream: &'a mut S, size: usize) -> Self {
+        let total_parts = ((size + MAX_CHUNK_SIZE as usize - 1) / MAX_CHUNK_SIZE as usize) as i32;
+        Self {
+            inner: AsyncMutex::new(
+                "upload_stream",
+                PartStreamInner {
+                    stream,
+                    current_part: 0,
+                },
+            ),
+            total_parts,
+        }
+    }
+
+    fn total_parts(&self) -> i32 {
+        self.total_parts
+    }
+
+    async fn next_part(&self) -> Result<Option<(i32, Vec<u8>)>, io::Error> {
+        let mut lock = self.inner.lock("read part").await;
+        if lock.current_part >= self.total_parts {
+            return Ok(None);
+        }
+        let mut read = 0;
+        let mut buffer = vec![0; MAX_CHUNK_SIZE as usize];
+
+        while read != buffer.len() {
+            let n = lock.stream.read(&mut buffer[read..]).await?;
+            if n == 0 {
+                if lock.current_part == self.total_parts - 1 {
+                    break;
+                } else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "reached EOF before reaching the last file part",
+                    ));
+                }
+            }
+            read += n;
+        }
+
+        let bytes = if read == buffer.len() {
+            buffer
+        } else {
+            buffer[..read].to_vec()
+        };
+
+        let res = Ok(Some((lock.current_part, bytes)));
+        lock.current_part += 1;
+        res
     }
 }

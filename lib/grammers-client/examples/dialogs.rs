@@ -11,7 +11,7 @@
 //! ```
 
 use grammers_client::{Client, Config, SignInError};
-use grammers_session::FileSession;
+use grammers_session::Session;
 use log;
 use simple_logger::SimpleLogger;
 use std::env;
@@ -19,6 +19,8 @@ use std::io::{self, BufRead as _, Write as _};
 use tokio::{runtime, task};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+const SESSION_FILE: &str = "dialogs.session";
 
 fn prompt(message: &str) -> Result<String> {
     let stdout = io::stdout();
@@ -45,7 +47,7 @@ async fn async_main() -> Result<()> {
 
     println!("Connecting to Telegram...");
     let mut client = Client::connect(Config {
-        session: FileSession::load_or_create("dialogs.session")?,
+        session: Session::load_file_or_create(SESSION_FILE)?,
         api_id,
         api_hash: api_hash.clone(),
         params: Default::default(),
@@ -75,10 +77,10 @@ async fn async_main() -> Result<()> {
                     .await?;
             }
             Ok(_) => (),
-            Err(e) => panic!(e),
+            Err(e) => panic!("{}", e),
         };
         println!("Signed in!");
-        match client.session().save() {
+        match client.session().save_to_file(SESSION_FILE) {
             Ok(_) => {}
             Err(e) => {
                 println!(
@@ -97,7 +99,7 @@ async fn async_main() -> Result<()> {
     // one that communicates with the network.
     //
     // The design's annoying to use for trivial sequential tasks, but is otherwise scalable.
-    let mut client_handle = client.handle();
+    let mut client_handle = client.clone();
     let network_handle = task::spawn(async move { client.run_until_disconnected().await });
 
     let mut dialogs = client_handle.iter_dialogs();
@@ -109,9 +111,8 @@ async fn async_main() -> Result<()> {
     }
 
     if sign_out {
+        // TODO revisit examples and get rid of "handle references" (also, this panics)
         drop(client_handle.sign_out_disconnect().await);
-    } else {
-        client_handle.disconnect().await;
     }
 
     network_handle.await??;

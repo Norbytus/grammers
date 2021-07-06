@@ -38,7 +38,7 @@
 //!
 //! The default feature set is intended to make the use of the library
 //! comfortable, and not intended to be minimal in code size. If you need
-//! a smaller libary or are concerned about build-times, consider disabling
+//! a smaller library or are concerned about build-times, consider disabling
 //! some of the default features.
 //!
 //! The default feature set includes:
@@ -78,7 +78,7 @@ mod generated;
 pub mod serialize;
 
 pub use deserialize::{Cursor, Deserializable};
-pub use generated::{enums, functions, types, LAYER};
+pub use generated::{enums, functions, name_for_id, types, LAYER};
 pub use serialize::Serializable;
 
 /// This struct represents the concrete type of a vector, that is,

@@ -9,13 +9,13 @@
 //! Methods related to sending messages.
 use crate::types::{Chat, IterBuffer, Message};
 use crate::utils::{generate_random_id, generate_random_ids};
-use crate::{types, ChatMap, ClientHandle};
+use crate::{types, ChatMap, Client};
 pub use grammers_mtsender::{AuthorizationError, InvocationError};
 use grammers_tl_types as tl;
 use std::collections::HashMap;
 
 fn map_random_ids_to_messages(
-    client: &ClientHandle,
+    client: &Client,
     random_ids: &[i64],
     updates: tl::enums::Updates,
 ) -> Vec<Option<Message>> {
@@ -56,7 +56,7 @@ fn map_random_ids_to_messages(
                 .collect::<HashMap<_, _>>();
 
             random_ids
-                .into_iter()
+                .iter()
                 .map(|rnd| rnd_to_id.get(rnd).and_then(|id| id_to_msg.remove(id)))
                 .collect()
         }
@@ -130,7 +130,7 @@ impl<R: tl::RemoteCall<Return = tl::enums::messages::Messages>> IterBuffer<R, Me
 pub type MessageIter = IterBuffer<tl::functions::messages::GetHistory, Message>;
 
 impl MessageIter {
-    fn new(client: &ClientHandle, peer: &Chat) -> Self {
+    fn new(client: &Client, peer: &Chat) -> Self {
         // TODO let users tweak all the options from the request
         Self::from_request(
             client,
@@ -182,7 +182,7 @@ impl MessageIter {
 pub type SearchIter = IterBuffer<tl::functions::messages::Search, Message>;
 
 impl SearchIter {
-    fn new(client: &ClientHandle, peer: &Chat) -> Self {
+    fn new(client: &Client, peer: &Chat) -> Self {
         // TODO let users tweak all the options from the request
         Self::from_request(
             client,
@@ -255,7 +255,7 @@ impl SearchIter {
 pub type GlobalSearchIter = IterBuffer<tl::functions::messages::SearchGlobal, Message>;
 
 impl GlobalSearchIter {
-    fn new(client: &ClientHandle) -> Self {
+    fn new(client: &Client) -> Self {
         // TODO let users tweak all the options from the request
         Self::from_request(
             client,
@@ -321,13 +321,13 @@ impl GlobalSearchIter {
 }
 
 /// Method implementations related to sending, modifying or getting messages.
-impl ClientHandle {
+impl Client {
     /// Sends a message to the desired chat.
     ///
     /// This method can also be used to send media such as photos, videos, documents, polls, etc.
     ///
     /// If you want to send a local file as media, you will need to use
-    /// [`ClientHandle::upload_file`] first.
+    /// [`Client::upload_file`] first.
     ///
     /// Refer to [`InputMessage`] to learn more formatting options, such as using markdown or
     /// adding buttons under your message (if you're logged in as a bot).
@@ -337,7 +337,7 @@ impl ClientHandle {
     /// # Examples
     ///
     /// ```
-    /// # async fn f(chat: grammers_client::types::Chat, mut client: grammers_client::ClientHandle) -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn f(chat: grammers_client::types::Chat, mut client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
     /// client.send_message(&chat, "Boring text message :-(".into()).await?;
     ///
     /// use grammers_client::InputMessage;
@@ -349,7 +349,7 @@ impl ClientHandle {
     ///
     /// [`InputMessage`]: crate::InputMessage
     pub async fn send_message(
-        &mut self,
+        &self,
         chat: &Chat,
         message: types::InputMessage,
     ) -> Result<Message, InvocationError> {
@@ -407,7 +407,7 @@ impl ClientHandle {
 
     /// Edits an existing message.
     ///
-    /// Similar to [`ClientHandle::send_message`], advanced formatting can be achieved with the
+    /// Similar to [`Client::send_message`], advanced formatting can be achieved with the
     /// options offered by [`InputMessage`].
     ///
     /// See also: [`Message::edit`].
@@ -415,7 +415,7 @@ impl ClientHandle {
     /// # Examples
     ///
     /// ```
-    /// # async fn f(chat: grammers_client::types::Chat, mut client: grammers_client::ClientHandle) -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn f(chat: grammers_client::types::Chat, mut client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
     /// let old_message_id = 123;
     /// client.edit_message(&chat, old_message_id, "New text message".into()).await?;
     /// # Ok(())
@@ -424,9 +424,8 @@ impl ClientHandle {
     ///
     /// [`InputMessage`]: crate::InputMessage
     // TODO don't require nasty InputPeer
-    // TODO Media
     pub async fn edit_message(
-        &mut self,
+        &self,
         chat: &Chat,
         message_id: i32,
         new_message: types::InputMessage,
@@ -436,7 +435,7 @@ impl ClientHandle {
             peer: chat.to_input_peer(),
             id: message_id,
             message: Some(new_message.text),
-            media: None,
+            media: new_message.media,
             reply_markup: new_message.reply_markup,
             entities: Some(new_message.entities),
             schedule_date: new_message.schedule_date,
@@ -468,7 +467,7 @@ impl ClientHandle {
     /// # Examples
     ///
     /// ```
-    /// # async fn f(chat: grammers_client::types::Chat, mut client: grammers_client::ClientHandle) -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn f(chat: grammers_client::types::Chat, mut client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
     /// let message_ids = [123, 456, 789];
     ///
     /// // Careful, these messages will be gone after the method succeeds!
@@ -477,7 +476,7 @@ impl ClientHandle {
     /// # }
     /// ```
     pub async fn delete_messages(
-        &mut self,
+        &self,
         chat: &Chat,
         message_ids: &[i32],
     ) -> Result<usize, InvocationError> {
@@ -514,7 +513,7 @@ impl ClientHandle {
     /// # Examples
     ///
     /// ```
-    /// # async fn f(destination: grammers_client::types::Chat, source: grammers_client::types::Chat, mut client: grammers_client::ClientHandle) -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn f(destination: grammers_client::types::Chat, source: grammers_client::types::Chat, mut client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
     /// let message_ids = [123, 456, 789];
     ///
     /// let messages = client.forward_messages(&destination, &message_ids, &source).await?;
@@ -524,7 +523,7 @@ impl ClientHandle {
     /// # }
     /// ```
     pub async fn forward_messages(
-        &mut self,
+        &self,
         destination: &Chat,
         message_ids: &[i32],
         source: &Chat,
@@ -551,7 +550,7 @@ impl ClientHandle {
     /// # Examples
     ///
     /// ```
-    /// # async fn f(message: grammers_client::types::Message, mut client: grammers_client::ClientHandle) -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn f(message: grammers_client::types::Message, mut client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
     /// if let Some(reply) = client.get_reply_to_message(&message).await? {
     ///     println!("The reply said: {}", reply.text());
     /// }
@@ -559,12 +558,12 @@ impl ClientHandle {
     /// # }
     /// ```
     pub async fn get_reply_to_message(
-        &mut self,
+        &self,
         message: &Message,
     ) -> Result<Option<Message>, InvocationError> {
         /// Helper method to fetch a single message by its input message.
         async fn get_message(
-            client: &mut ClientHandle,
+            client: &Client,
             chat: &Chat,
             id: tl::enums::InputMessage,
         ) -> Result<(tl::enums::messages::Messages, bool), InvocationError> {
@@ -628,7 +627,7 @@ impl ClientHandle {
     /// # Examples
     ///
     /// ```
-    /// # async fn f(chat: grammers_client::types::Chat, mut client: grammers_client::ClientHandle) -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn f(chat: grammers_client::types::Chat, mut client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
     /// // Note we're setting a reasonable limit, or we'd print out ALL the messages in chat!
     /// let mut messages = client.iter_messages(&chat).limit(100);
     ///
@@ -649,7 +648,7 @@ impl ClientHandle {
     /// # Examples
     ///
     /// ```
-    /// # async fn f(chat: grammers_client::types::Chat, mut client: grammers_client::ClientHandle) -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn f(chat: grammers_client::types::Chat, mut client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
     /// // Let's print all the people who think grammers is cool.
     /// let mut messages = client.search_messages(&chat).query("grammers is cool");
     ///
@@ -671,7 +670,7 @@ impl ClientHandle {
     /// # Examples
     ///
     /// ```
-    /// # async fn f(mut client: grammers_client::ClientHandle) -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn f(mut client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
     /// // Let's print all the chats were people think grammers is cool.
     /// let mut messages = client.search_all_messages().query("grammers is cool");
     ///
@@ -695,7 +694,7 @@ impl ClientHandle {
     /// # Examples
     ///
     /// ```
-    /// # async fn f(chat: grammers_client::types::Chat, mut client: grammers_client::ClientHandle) -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn f(chat: grammers_client::types::Chat, mut client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
     /// let message_ids = [123, 456, 789];
     ///
     /// let messages = client.get_messages_by_id(&chat, &message_ids).await?;
@@ -705,12 +704,12 @@ impl ClientHandle {
     /// # }
     /// ```
     pub async fn get_messages_by_id(
-        &mut self,
+        &self,
         chat: &Chat,
         message_ids: &[i32],
     ) -> Result<Vec<Option<Message>>, InvocationError> {
         let id = message_ids
-            .into_iter()
+            .iter()
             .map(|&id| tl::enums::InputMessage::Id(tl::types::InputMessageId { id }))
             .collect();
 
@@ -747,7 +746,7 @@ impl ClientHandle {
     /// # Examples
     ///
     /// ```
-    /// # async fn f(chat: grammers_client::types::Chat, mut client: grammers_client::ClientHandle) -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn f(chat: grammers_client::types::Chat, mut client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
     /// if let Some(message) = client.get_pinned_message(&chat).await? {
     ///     println!("There is a message pinned in {}: {}", chat.name(), message.text());
     /// } else {
@@ -757,7 +756,7 @@ impl ClientHandle {
     /// # }
     /// ```
     pub async fn get_pinned_message(
-        &mut self,
+        &self,
         chat: &Chat,
     ) -> Result<Option<Message>, InvocationError> {
         // TODO return types::Message and print its text in the example
@@ -784,8 +783,7 @@ impl ClientHandle {
         Ok(messages
             .into_iter()
             .flat_map(|m| Message::new(self, m, &chats))
-            .filter(|m| m.chat().to_peer() == chat.to_peer())
-            .next())
+            .find(|m| m.chat().to_peer() == chat.to_peer()))
     }
 
     /// Pin a message in the chat. This will not notify any users.
@@ -793,18 +791,14 @@ impl ClientHandle {
     /// # Examples
     ///
     /// ```
-    /// # async fn f(chat: grammers_client::types::Chat, mut client: grammers_client::ClientHandle) -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn f(chat: grammers_client::types::Chat, mut client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
     /// let message_id = 123;
     /// client.pin_message(&chat, message_id).await?;
     /// # Ok(())
     /// # }
     /// ```
     // TODO return produced Option<service message>
-    pub async fn pin_message(
-        &mut self,
-        chat: &Chat,
-        message_id: i32,
-    ) -> Result<(), InvocationError> {
+    pub async fn pin_message(&self, chat: &Chat, message_id: i32) -> Result<(), InvocationError> {
         self.update_pinned(chat, message_id, true).await
     }
 
@@ -813,26 +807,17 @@ impl ClientHandle {
     /// # Examples
     ///
     /// ```
-    /// # async fn f(chat: grammers_client::types::Chat, mut client: grammers_client::ClientHandle) -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn f(chat: grammers_client::types::Chat, mut client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
     /// let message_id = 123;
     /// client.unpin_message(&chat, message_id).await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn unpin_message(
-        &mut self,
-        chat: &Chat,
-        message_id: i32,
-    ) -> Result<(), InvocationError> {
+    pub async fn unpin_message(&self, chat: &Chat, message_id: i32) -> Result<(), InvocationError> {
         self.update_pinned(chat, message_id, false).await
     }
 
-    async fn update_pinned(
-        &mut self,
-        chat: &Chat,
-        id: i32,
-        pin: bool,
-    ) -> Result<(), InvocationError> {
+    async fn update_pinned(&self, chat: &Chat, id: i32, pin: bool) -> Result<(), InvocationError> {
         self.invoke(&tl::functions::messages::UpdatePinnedMessage {
             silent: true,
             unpin: !pin,
@@ -849,16 +834,16 @@ impl ClientHandle {
     /// # Examples
     ///
     /// ```
-    /// # async fn f(chat: grammers_client::types::Chat, mut client: grammers_client::ClientHandle) -> Result<(), Box<dyn std::error::Error>> {
+    /// # async fn f(chat: grammers_client::types::Chat, mut client: grammers_client::Client) -> Result<(), Box<dyn std::error::Error>> {
     /// client.unpin_all_messages(&chat).await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn unpin_all_messages(&mut self, chat: &Chat) -> Result<(), InvocationError> {
+    pub async fn unpin_all_messages(&self, chat: &Chat) -> Result<(), InvocationError> {
         self.invoke(&tl::functions::messages::UnpinAllMessages {
             peer: chat.to_input_peer(),
         })
-        .await
-        .map(drop)
+        .await?;
+        Ok(())
     }
 }

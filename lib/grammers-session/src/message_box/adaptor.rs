@@ -83,6 +83,7 @@ pub(super) fn update_short_message(
                 post_author: None,
                 grouped_id: None,
                 restriction_reason: None,
+                ttl_period: short.ttl_period,
             }
             .into(),
             pts: short.pts,
@@ -134,6 +135,7 @@ pub(super) fn update_short_chat_message(
                 post_author: None,
                 grouped_id: None,
                 restriction_reason: None,
+                ttl_period: short.ttl_period,
             }
             .into(),
             pts: short.pts,
@@ -149,7 +151,11 @@ pub(super) fn update_short_sent_message(
 ) -> tl::types::UpdatesCombined {
     update_short(tl::types::UpdateShort {
         update: tl::types::UpdateNewMessage {
-            message: tl::types::MessageEmpty { id: short.id }.into(),
+            message: tl::types::MessageEmpty {
+                id: short.id,
+                peer_id: None,
+            }
+            .into(),
             pts: short.pts,
             pts_count: short.pts_count,
         }
@@ -160,7 +166,7 @@ pub(super) fn update_short_sent_message(
 
 pub(super) fn adapt(
     updates: tl::enums::Updates,
-    chat_hashes: &ChatHashCache,
+    chat_hashes: &mut ChatHashCache,
 ) -> Result<tl::types::UpdatesCombined, Gap> {
     Ok(match updates {
         // > `updatesTooLong` indicates that there are too many events pending to be pushed
@@ -201,10 +207,16 @@ pub(super) fn adapt(
         // > [the] `seq` attribute, which indicates the remote `Updates` state after the
         // > generation of the `Updates`, and `seq_start` indicates the remote `Updates` state
         // > after the first of the `Updates` in the packet is generated
-        tl::enums::Updates::Combined(combined) => combined,
+        tl::enums::Updates::Combined(combined) => {
+            chat_hashes.extend(&combined.users, &combined.chats);
+            combined
+        }
         // > [the] `seq_start` attribute is omitted, because it is assumed that it is always
         // > equal to `seq`.
-        tl::enums::Updates::Updates(updates) => self::updates(updates),
+        tl::enums::Updates::Updates(updates) => {
+            chat_hashes.extend(&updates.users, &updates.chats);
+            self::updates(updates)
+        }
         // Even though we lack fields like the message text, it still needs to be handled, so
         // that the `pts` can be kept consistent.
         tl::enums::Updates::UpdateShortSentMessage(short) => update_short_sent_message(short),
@@ -397,11 +409,6 @@ impl PtsInfo {
             DialogFilterOrder(_) => None,
             DialogFilters => None,
             PhoneCallSignalingData(_) => None,
-            ChannelParticipant(u) => Some(Self {
-                pts: u.qts,
-                pts_count: 0,
-                entry: Entry::SecretChats,
-            }),
             ChannelMessageForwards(_) => None,
             ReadChannelDiscussionInbox(_) => None,
             ReadChannelDiscussionOutbox(_) => None,
@@ -423,6 +430,22 @@ impl PtsInfo {
             Chat(_) => None,
             GroupCallParticipants(_) => None,
             GroupCall(_) => None,
+            PeerHistoryTtl(_) => None,
+            ChatParticipant(u) => Some(Self {
+                pts: u.qts,
+                pts_count: 0,
+                entry: Entry::SecretChats,
+            }),
+            ChannelParticipant(u) => Some(Self {
+                pts: u.qts,
+                pts_count: 0,
+                entry: Entry::SecretChats,
+            }),
+            BotStopped(u) => Some(Self {
+                pts: u.qts,
+                pts_count: 0,
+                entry: Entry::SecretChats,
+            }),
         }
     }
 }
